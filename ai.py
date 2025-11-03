@@ -149,7 +149,15 @@ async def analyze_review_text(review_text: str) -> dict:
                     json_text = result["candidates"][0]["content"]["parts"][0]["text"]
                     if conn is None:
                         conn = init_db()
-                    add_restaurant_data(conn, review_text, json_text)
+                    scores = json.loads(json_text)["scores"]
+                    add_restaurant_data(
+                        conn = conn,
+                        store_name="Test Restaurant",
+                        taste=scores.get("taste", None),
+                        cleanliness=scores.get("cleanliness", None),
+                        atmosphere=scores.get("atmosphere", None),
+                        price=scores.get("price", None),
+                    )
                     
                     # JSON文字列をパースして辞書に
                     parsed_json = json.loads(json_text)
