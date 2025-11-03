@@ -1,6 +1,7 @@
 import json
 import os
 import asyncio
+import sqlite3
 
 import aiohttp #非同期通信ライブラリ
 from google import genai
@@ -9,7 +10,7 @@ from db import init_db, add_restaurant_data, get_all_restaurants, close_db
 
 # --- Gemini API 設定 ---
 API_KEY = os.environ.get("GEMINI_API_KEY", "") # どちらか
-API_KEY = ""
+API_KEY = "AIzaSyDZFGQlwLt5FHOa8UW4lZP4bOmLljC7-yA"
 if not API_KEY:
     print("警告: GEMINI_API_KEY が設定されていません。")
 
@@ -19,21 +20,38 @@ API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-f
 # DBスキーマに合わせて英語のキーで出力するように強制する
 # 'service' (接客) をスキーマから削除
 EXPECTED_JSON_SCHEMA = {
-    "type": "OBJECT",
+    "type": "object",
     "properties": {
         "scores": {
-            "type": "OBJECT",
+            "type": "object",
             "properties": {
-                "taste": { "type": ["NUMBER", "NULL"], "description": "おいしさ (1-5点 または null)" },
-                "cleanliness": { "type": ["NUMBER", "NULL"], "description": "きれいさ (1-5点 または null)" },
-                "price": { "type": ["NUMBER", "NULL"], "description": "コストパフォーマンス (1-5点 または null)" },
-                "atmosphere": { "type": ["NUMBER", "NULL"], "description": "雰囲気 (1-5点 または null)" }
+                "taste": {
+                    "type": "number",
+                    "nullable": True,
+                    "description": "おいしさ (1-5点 または null)"
+                },
+                "cleanliness": {
+                    "type": "number",
+                    "nullable": True,
+                    "description": "きれいさ (1-5点 または null)"
+                },
+                "price": {
+                    "type": "number",
+                    "nullable": True,
+                    "description": "コスパ (1-5点 または null)"
+                },
+                "atmosphere": {
+                    "type": "number",
+                    "nullable": True,
+                    "description": "雰囲気 (1-5点 または null)"
+                },
             },
             "required": ["taste", "cleanliness", "price", "atmosphere"]
         }
     },
     "required": ["scores"]
 }
+
 
 
 def build_system_prompt_analize():
@@ -69,7 +87,7 @@ def build_system_prompt_search():
     """
     return """
 あなたはプロの飲食店検索エンジニアです。
-渡されたユーザーのリクエストテキストを読み、リクエストされている理想の店を、指定された「評価軸」に基づき、それぞれ1点から5点の5段階で採点してください。
+渡されたユーザーのリクエストテキストを読み、リクエストが表す店の特徴を、指定された「評価軸」に基づき、それぞれ1点から5点の5段階で採点してください。
 
 # 評価軸
 1.  **taste (おいしさ)**: 料理、食材の質、味付け、調理技術など。
@@ -90,7 +108,7 @@ def build_system_prompt_search():
 - 必ず指定されたJSON形式(英語のキー: taste, cleanliness, price, atmosphere)で回答してください。
 """
 
-async def analyze_review_text(review_text: str) -> dict:
+async def analyze_review_text(review_text: str, conn: sqlite3.Connection = None) -> dict:
     """
     レビューテキストをGemini APIに送信し、分析結果(JSON)をデータベースに登録する。
     """
@@ -147,8 +165,6 @@ async def analyze_review_text(review_text: str) -> dict:
                 ):
                     # JSON文字列を取得
                     json_text = result["candidates"][0]["content"]["parts"][0]["text"]
-                    if conn is None:
-                        conn = init_db()
                     scores = json.loads(json_text)["scores"]
                     add_restaurant_data(
                         conn = conn,
@@ -180,7 +196,7 @@ async def analyze_review_text(review_text: str) -> dict:
             # エラーを再スローして、main.py側で処理できるようにする
             raise e
 
-async def search_restaurant(search_text: str) -> json:
+async def search_restaurant(search_text: str, conn: sqlite3.Connection = None) -> list[dict]:
     system_prompt = build_system_prompt_search()
     
     # Gemini APIへのリクエストペイロード
@@ -227,17 +243,16 @@ async def search_restaurant(search_text: str) -> json:
                 ):
                     # JSON文字列を取得
                     json_text = result["candidates"][0]["content"]["parts"][0]["text"]
-                    if conn is None:
-                        conn = init_db()
                     # 最も高い評価値
                     parsed_json = json.loads(json_text)
-                    priority = max(parsed_json["scores"], key=parsed_json["scores"].get)
+                    valid_scores = {k: v for k, v in parsed_json["scores"].items() if v is not None}
+                    priority = max(valid_scores, key=valid_scores.get)
                     
                     # データベースからすべてのレストラン情報を取得
                     restaurants = get_all_restaurants(conn)
                     
                     # priority順に良いレストランを3つ返す
-                    sorted_restaurants = sorted(restaurants, key=lambda x: x.get(priority, 0), reverse=True)
+                    sorted_restaurants = sorted(restaurants, key=lambda x: int(x.get(priority)) or 0, reverse=True)
                     top_3_restaurants = sorted_restaurants[:3]
                     return top_3_restaurants
                 
@@ -255,6 +270,6 @@ async def search_restaurant(search_text: str) -> json:
             raise Exception("Failed to decode JSON response from Gemini API.")
         except Exception as e:
             # その他のエラー
-            print(f"Error in analyze_review_text: {e}")
+            print(f"Error in search_restaurant: {e}")
             # エラーを再スローして、main.py側で処理できるようにする
             raise e
